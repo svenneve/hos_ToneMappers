@@ -1,0 +1,555 @@
+--[[--
+hos_ToneMappers
+
+Various tonemap implementations taken from various sources.
+
+https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+http://filmicworlds.com/blog/filmic-tonemapping-operators/
+https://imdoingitwrong.wordpress.com/2010/08/19/why-reinhard-desaturates-my-blacks-3/
+
+https://www.shadertoy.com/view/XlKSDR
+https://www.shadertoy.com/view/ldcSRN
+
+// Uchimura 2017, "HDR theory and practice"
+// Math: https://www.desmos.com/calculator/gslcdxvipg
+// Source: https://www.slideshare.net/nikuque/hdr-theory-and-practicce-jp
+
+// Lottes 2016, "Advanced Techniques and Optimization of HDR Color Pipelines"
+    
+--]]--
+version = "version 1.0 (Sept 03, 2018)"
+--[[
+
+ Written by Sven Neve (sven[AT]houseofsecrets[DOT]nl)
+ Copyright (c) 2018 House of Secrets
+ (http://www.svenneve.com)
+
+ The authors hereby grant permission to use, copy, and distribute this
+ software and its documentation for any purpose, provided that existing
+ copyright notices are retained in all copies and that this notice is
+ included verbatim in any distributions. Additionally, the authors grant
+ permission to modify this software and its documentation for any
+ purpose, provided that such modifications are not distributed without
+ the explicit consent of the authors and that existing copyright notices
+ are retained in all copies. 
+
+ IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY FOR
+ DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING
+ OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY DERIVATIVES
+ THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE POSSIBILITY OF
+ SUCH DAMAGE. 
+
+ THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+ INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+ THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND
+ DISTRIBUTORS HAVE NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT,
+ UPDATES, ENHANCEMENTS, OR MODIFICATIONS. 
+
+--]]
+
+FuRegisterClass("hos_ToneMappers", CT_Tool, {
+    REGS_Name = "ToneMappers",
+    REGS_Category = "House of Secrets\\OpenCL\\Color",
+    REGS_OpIconString = "hTM",
+    REGS_OpDescription = "ToneMapper collection in OpenCL",
+	REGS_Company 		= "Sven Neve / House of Secrets",
+	REGS_URL 			= "http://www.svenneve.nl",
+	REGS_HelpTopic      = "http://www.svenneve.nl",
+    REG_NoObjMatCtrls = true,
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false, 
+    })
+
+    
+clsource = [[
+//__constant float gamma = 2.2f;
+
+/////////////////////////////////////////////////////////////////////////////
+// Linear / Pass through
+float3 Linear(float3 color, float exposure)
+{
+    //float exposure = 1.0f;
+    color = clamp(exposure * color, 0.0f, 1.0f);
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Reinhard Simple
+float3 ReinhardSimple(float3 color, float exposure)
+{
+    //float exposure = 1.5f;
+    color *= exposure/(1.0f + color / exposure);
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Reinhard Luma based
+float3 ReinhardLuma(float3 color)
+{
+    float luma = dot(color, (float3)(0.2126f, 0.7152f, 0.0722f));
+    float toneMappedLuma = luma / (1.0f + luma);
+    color *= toneMappedLuma / luma;
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Reinhard Luma based with white preservation
+float3 ReinhardLumaPreserveWhites(float3 color, float W)
+{
+    //float white = 2.0f;
+    float white = W;
+    float luma = dot(color, (float3)(0.2126f, 0.7152f, 0.0722f));
+    float toneMappedLuma = luma * (1.0f + luma / (white*white)) / (1.0f + luma);
+    color *= toneMappedLuma / luma;
+    return color;
+}
+
+/*
+float3 limitedPerChannelReinhard(float c){
+    float limit = 4.0f;
+    float contrast = 0.6f;
+    
+    c *= (c / (limit*limit) + 1.f) / (c + 1.f);
+    
+    return c;
+}
+*/
+
+/////////////////////////////////////////////////////////////////////////////
+// Reinhard Filmic
+
+//__constant float W = 1.2f;
+//__constant float W = 11.2f;
+__constant float T2 = 7.5f;
+__constant float T = 0.01f;
+
+float FilmicReinhardCurveA (float x) {
+    float q = (T2*T2 + 1.0f)*x*x;    
+	return q / (q + x + T2*T2);
+}
+
+float FilmicReinhardCurveB (float x) {
+    float q = (T + 1.0f)*x*x;    
+	return q / (q + x + T);
+}
+
+float3 FilmicReinhard(float3 color, float W) {
+    float w = FilmicReinhardCurveB(W);
+    color = (float3)(
+        FilmicReinhardCurveB(color.x),
+        FilmicReinhardCurveB(color.y),
+        FilmicReinhardCurveB(color.z)) / w;
+    //color = smoothstep(-0.025f, 1.0f,color);
+    //color = pow(color, 1.f/2.2f);
+    return color;
+}
+
+float3 RomB(float3 color)
+{
+    color = exp( -1.0f / ( 2.72f*color + 0.15f ) );
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Filmic A
+float3 FilmicA(float3 color)
+{
+    color = max((float3)(0.0f), color - (float3)(0.004f));
+    color = (color * (6.2f * color + .5f)) / (color * (6.2f * color + 1.7f) + 0.06f);
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Filmic B
+float FilmicBCurve(float x) {
+	return ((x*(0.22f*x+0.1f*0.3f)+0.2f*0.01f)/(x*(0.22f*x+0.3f)+0.2f*0.3f))-0.01f/0.3f;
+}
+
+float3 FilmicB(float3 x, float W) {
+    float w = FilmicBCurve(W);
+    return (float3)(
+        FilmicBCurve(x.x),
+        FilmicBCurve(x.y),
+        FilmicBCurve(x.z)) / w;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// ACES Simple / Narkowicz
+float3 ACES(float3 color) {
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return (color * (a * color + b)) / (color * (c * color + d) + e);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// ACES Fitted
+float3 ACESInputMatMul(float3 a)
+{
+    float AIM[9] = {
+    0.59719f, 0.35458f, 0.04823f,
+    0.07600f, 0.90834f, 0.01566f,
+    0.02840f, 0.13383f, 0.83777f
+    };
+    float3 r = (float3)(0.0f);
+    r.x = a.x * AIM[0] + a.y * AIM[1] + a.z * AIM[2];
+    r.y = a.x * AIM[3] + a.y * AIM[4] + a.z * AIM[5];
+    r.z = a.x * AIM[6] + a.y * AIM[7] + a.z * AIM[8];
+    return r;
+}
+
+float3 ACESOutputMatMul(float3 a)
+{
+    float AIM[9] = {
+     1.60475f, -0.53108f, -0.07367f,
+    -0.10208f,  1.10813f, -0.00605f,
+    -0.00327f, -0.07276f,  1.07602f
+    };
+    float3 r = (float3)(0.0f);
+    r.x = a.x * AIM[0] + a.y * AIM[1] + a.z * AIM[2];
+    r.y = a.x * AIM[3] + a.y * AIM[4] + a.z * AIM[5];
+    r.z = a.x * AIM[6] + a.y * AIM[7] + a.z * AIM[8];
+    return r;
+}
+
+float3 RRTAndODTFit(float3 v)
+{
+    float3 a = v * (v + 0.0245786f) - 0.000090537f;
+    float3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+    return a / b;
+}
+
+float3 ACESFitted(float3 color)
+{
+    color = ACESInputMatMul(color);
+    color = RRTAndODTFit(color);
+    color = ACESOutputMatMul(color);
+    color = clamp(color, 0.0f, 1.0f);
+    
+    return color;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Uncharted 2 Tone mapper
+float3 Uncharted2Tonemap(float3 x)
+{
+    float A = 0.15f;
+    float B = 0.50f;
+    float C = 0.10f;
+    float D = 0.20f;
+    float E = 0.02f;
+    float F = 0.30f;
+    return ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F;
+}
+
+float3 Uncharted2(float3 color, float W, float exposureBias)
+{
+    //float W = 11.2f;
+    //float exposureBias = 2.0f;
+    color *= exposureBias;
+    color = Uncharted2Tonemap(color);
+    float3 whiteScale = Uncharted2Tonemap(W);
+    color /= whiteScale;
+    return color;
+}
+ 
+float3 CustomLog(float3 c){
+    
+    // in my experience limit=2.2 and contrast=0.35 gives nice result
+    // i prefer to leave a lot of highlights
+    // also log curve fades to highlights beautifully
+    // however i raised this parameters to make it look
+    // somewhat identical to other algorithms here
+    
+    // according to my information the dynamic range of
+    // human eye's light perception is around
+    // 2.5 of what monitor can provide
+    // though it's hightly questionable in terms of
+    // both the data and my understanding of it
+    
+    // P.S.
+    // i noticed that applying inverse tonemap transformation to
+    // diffuse textures improves the final render a lot
+    
+    float limit = 2.5f;
+    float contrast = 0.3f;
+    
+    // do the tone mapping
+    
+    c = log(c + 1.0f) / log(limit + 1.0f);
+    
+    // clamping for hackyContrast because s_curve
+    // does not behave properly outside [0; 1]
+    // if you want to keep values outside [0; 1]
+    // for example for bloom post-effect
+    // you would need comething better than
+    // hackyContrast()
+    
+    c = clamp(c,0.0f,1.0f);
+    
+    // hacky contrast s_curve
+    // btw it's a freatapproximation for 1-cos(x*3.14f)*0.5
+    
+    c = mix(c, c * c * (3.0f - 2.0f * c), contrast);
+    
+    // this creates pleasant hue shifting
+    // i amplified the effect to demonstrate it more clearly
+    // usually i use it very subtle
+    
+    c = pow(c, (float3)(1.05f,0.9f,1.0f));
+    
+    return c;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Unreal
+float3 Unreal(float3 x) {
+
+    return x / (x + 0.155f) * 1.019f;
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Uchimura
+float Uchimura_Curve(float x, float P, float a, float m, float l, float c, float b) {
+    float l0 = ((P - m) * l) / a;
+    float L0 = m - m / a;
+    float L1 = m + (1.0 - m) / a;
+    float S0 = m + l0;
+    float S1 = m + a * l0;
+    float C2 = (a * P) / (P - S1);
+    float CP = -C2 / P;
+
+    float w0 = 1.0f - smoothstep(0.0f, m, x);
+    float w2 = step(m + l0, x);
+    float w1 = 1.0f - w0 - w2;
+
+    float T = m * pow(x / m, c) + b;
+    float S = P - (P - S1) * exp(CP * (x - S0));
+    float L = m + a * (x - m);
+
+    return T * w0 + L * w1 + S * w2;
+}
+
+float3 Uchimura(float3 color) {
+    const float P = 1.0f;  // max display brightness
+    const float a = 1.0f;  // contrast
+    const float m = 0.22f; // linear section start
+    const float l = 0.4f;  // linear section length
+    const float c = 1.33f; // black
+    const float b = 0.0f;  // pedestal
+    color.x = Uchimura_Curve(color.x, P, a, m, l, c, b);
+    color.y = Uchimura_Curve(color.y, P, a, m, l, c, b);
+    color.z = Uchimura_Curve(color.z, P, a, m, l, c, b);
+    return color;//Uchimura_Curve(x, P, a, m, l, c, b);
+}
+
+/////////////////////////////////////////////////////////////////////////////
+// Lottes
+float3 Lottes(float3 x) {
+    const float a = 1.6f;
+    const float d = 0.977f;
+    const float hdrMax = 8.0f;
+    const float midIn = 0.18f;
+    const float midOut = 0.267f;
+
+    // Can be precomputed
+    const float b =
+        (-pow(midIn, a) + pow(hdrMax, a) * midOut) /
+        ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+    const float c =
+        (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut) /
+        ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+
+    return pow(x, a) / (pow(x, a * d) * b + c);
+}
+
+kernel void ToneMapKernel(FuReadImage_t bgd,
+                     FuWriteImage_t dst,
+                     int2 bgdsize,
+                     const int tonemapper,
+                     const float gamma,
+                     const float whitepoint,
+                     const float exposure
+                    )
+{
+    float4 incol1, outrgba;
+    int2 ipos = (int2)(get_global_id(1), get_global_id(0));
+    incol1 = FuReadImageCf(bgd, ipos, bgdsize);
+    if (tonemapper == 0) outrgba.xyz = Linear(incol1.xyz, exposure);
+    else if (tonemapper == 1) outrgba.xyz = ReinhardSimple(incol1.xyz, exposure);
+    else if (tonemapper == 2) outrgba.xyz = ReinhardLuma(incol1.xyz);
+    else if (tonemapper == 3) outrgba.xyz = ReinhardLumaPreserveWhites(incol1.xyz, whitepoint);
+    else if (tonemapper == 4) outrgba.xyz = FilmicReinhard(incol1.xyz, whitepoint);
+    else if (tonemapper == 5) outrgba.xyz = ACES(incol1.xyz);
+    else if (tonemapper == 6) outrgba.xyz = ACESFitted(incol1.xyz);
+    else if (tonemapper == 7) {outrgba.xyz = FilmicA(incol1.xyz);outrgba.xyz = pow(outrgba.xyz, gamma);}
+    else if (tonemapper == 8) outrgba.xyz = FilmicB(incol1.xyz, whitepoint);
+    else if (tonemapper == 9) outrgba.xyz = Uncharted2(incol1.xyz, whitepoint, exposure);
+    else if (tonemapper == 10) {outrgba.xyz = Unreal(incol1.xyz);outrgba.xyz = pow(outrgba.xyz, gamma);}
+    else if (tonemapper == 11) outrgba.xyz = Uchimura(incol1.xyz);
+    else if (tonemapper == 12) outrgba.xyz = Lottes(incol1.xyz);
+    else if (tonemapper == 13) outrgba.xyz = RomB(incol1.xyz);
+    else if (tonemapper == 14) outrgba.xyz = CustomLog(incol1.xyz);
+    else outrgba.xyz = incol1.xyz;
+
+        //
+    // Smooth Step
+    // outrgba.xyz = smoothstep(-0.025f, 1.0f, outrgba.xyz);
+    
+    // Apply gamma
+    outrgba.xyz = pow(outrgba.xyz, 1.0f / gamma);
+    
+    //Set alpha
+    outrgba.w = incol1.w;
+    FuWriteImagef(dst, ipos, bgdsize, outrgba);
+}
+]]
+
+
+function Create()
+    InToneMapper = self:AddInput("Tone Mapper", "ToneMapper", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ComboControl",
+        INP_Default = 0.0,
+        INP_Integer = true,
+        INP_DoNotifyChanged  = true,
+        { CCS_AddString = "Linear", },
+        { CCS_AddString = "Reinhard Simple", },
+        { CCS_AddString = "Reinhard Luma", },
+        { CCS_AddString = "Reinhard Preserve Whites", },
+        { CCS_AddString = "Reinhard Filmic", },
+        { CCS_AddString = "ACES", },
+        { CCS_AddString = "ACES Fitted", },
+        { CCS_AddString = "Filmic A", },
+        { CCS_AddString = "Filmic B", },
+        { CCS_AddString = "Uncharted 2", },
+        { CCS_AddString = "Unreal 3", },
+        { CCS_AddString = "Uchimura", },
+        { CCS_AddString = "Lottes", },
+        { CCS_AddString = "Romb", },
+        --{ CCS_AddString = "Custom Log", },
+        })
+        
+   InWhitePoint = self:AddInput("White Point", "WhitePoint", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 11.2,
+        INP_MinScale = 1.0,
+        INP_MaxScale = 20.0,
+        })
+        
+    InExposure = self:AddInput("Exposure", "Exposure", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 1.0,
+        INP_MinScale = 0.5,
+        INP_MaxScale = 5.0,
+        })
+        
+    InGamma = self:AddInput("Gamma", "Gamma", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 2.2,
+        INP_MinScale = 0.4545,
+        INP_MaxScale = 2.2,
+        })
+    
+    InImage1 = self:AddInput("Input1", "Input1", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+        })
+        
+    OutImage = self:AddOutput("Output", "Output", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+        })  
+end
+
+function OnAddToFlow()
+    mgr = OCLManager()
+    if mgr then
+        local path = string.sub(debug.getinfo(1).source, 2)
+        prog = mgr:BuildCachedProgram("Fuse.ToneMapperFuse", path, clsource)
+    end
+end
+
+function OnRemoveFromFlow()
+    prog = nil
+    mgr = nil
+end
+
+function NotifyChanged(inp, param, time)
+	if inp == InToneMapper then
+        local mapper = param.Value
+		show_white_point = false;
+		show_exposure = false;
+        if mapper == 3 or mapper == 4 or mapper == 8 or mapper == 9 then show_white_point = true end
+        if mapper == 0 or mapper ==1 or mapper == 9 then show_exposure = true end
+        --local default_exposures = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1}
+        --InExposure:SetAttrs({ INP_Default = default_exposures[mapper+1] })  
+		InWhitePoint:SetAttrs({ IC_Disabled = not show_white_point, IC_Disabled = not show_white_point })
+		InExposure:SetAttrs({ IC_Disabled = not show_exposure, PC_Disabled = not show_exposure })
+    end
+end
+
+function Process(req) 
+
+    local img1 = InImage1:GetValue(req)
+    local out = Image({IMG_Like=img1})
+    local tonemapper = InToneMapper:GetValue(req).Value
+    local whitepoint = InWhitePoint:GetValue(req).Value
+    local exposure = InExposure:GetValue(req).Value
+    local gamma = InGamma:GetValue(req).Value
+    local success = false
+    
+    -- local tonemap_kernel_names =
+    -- {
+      -- [1] = "ToneMapKernelLinear",
+      -- [2] = "ToneMapKernelReinhart",
+      -- [3] = "ToneMapKernelReinhartLuma",
+      -- [4] = "ToneMapKernelReinhartPreserve"
+    -- }
+
+    if prog and mgr then
+        local img1cl = prog:CreateImage(img1, "read")
+        
+        local outcl = prog:CreateImage(out, "readwrite")
+        if img1cl and outcl then
+            --local tonemap_kernel = prog:CreateKernel(tonemap_kernel_names[tonemapper])
+            local tonemap_kernel = prog:CreateKernel("ToneMapKernel")
+
+            if tonemap_kernel then
+                prog:SetArg(tonemap_kernel, 0, img1cl)
+                prog:SetArg(tonemap_kernel, 1, outcl)
+                prog:SetArgInt(tonemap_kernel, 2, img1.Width, img1.Height)
+                prog:SetArgInt(tonemap_kernel, 3, tonemapper)
+                prog:SetArg(tonemap_kernel, 4, gamma)
+                prog:SetArg(tonemap_kernel, 5, whitepoint)
+                prog:SetArg(tonemap_kernel, 6, exposure)
+                success = prog:RunKernel(tonemap_kernel)
+                if self.Status then
+                    if success then
+                        success = prog:Download(outcl, out)
+                    end
+                end
+            end
+        end
+    end
+
+    if prog and not success then        -- failed? may need to build a new context
+        prog = nil
+        mgr = nil
+        collectgarbage()                -- force cleanup now
+        mgr = OCLManager()
+        if mgr then
+            local path = string.sub(debug.getinfo(1).source, 2)
+            prog = mgr:BuildCachedProgram("Fuse.ToneMapperFuse", path, clsource)
+        end
+    end
+
+    OutImage:Set(req, out)
+end
