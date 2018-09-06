@@ -7,6 +7,20 @@ https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
 http://filmicworlds.com/blog/filmic-tonemapping-operators/
 https://imdoingitwrong.wordpress.com/2010/08/19/why-reinhard-desaturates-my-blacks-3/
 
+
+https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
+//=================================================================================================
+//
+//  Baking Lab
+//  by MJP and David Neubelt
+//  http://mynameismjp.wordpress.com/
+//
+//  All code licensed under the MIT license
+//
+//=================================================================================================
+
+
+
 https://www.shadertoy.com/view/XlKSDR
 https://www.shadertoy.com/view/ldcSRN
 
@@ -68,10 +82,11 @@ clsource = [[
 
 /////////////////////////////////////////////////////////////////////////////
 // Linear / Pass through
-float3 Linear(float3 color, float exposure)
+float3 Linear(float3 color/*, float exposure*/)
 {
     //float exposure = 1.0f;
-    color = clamp(exposure * color, 0.0f, 1.0f);
+    //color = clamp(exposure * color, 0.0f, 1.0f);
+    color = clamp(color, 0.0f, 1.0f);
     return color;
 }
 
@@ -80,7 +95,7 @@ float3 Linear(float3 color, float exposure)
 float3 ReinhardSimple(float3 color, float exposure)
 {
     //float exposure = 1.5f;
-    color *= exposure/(1.0f + color / exposure);
+    color *= exposure /(1.0f + color / exposure);
     return color;
 }
 
@@ -188,8 +203,12 @@ float3 ACES(float3 color) {
 
 /////////////////////////////////////////////////////////////////////////////
 // ACES Fitted
+
+// The code in this file was originally written by Stephen Hill (@self_shadow), who deserves all
+// credit for coming up with this fit and implementing it. Buy him a beer next time you see him. :)
 float3 ACESInputMatMul(float3 a)
 {
+    // sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
     float AIM[9] = {
     0.59719f, 0.35458f, 0.04823f,
     0.07600f, 0.90834f, 0.01566f,
@@ -204,6 +223,7 @@ float3 ACESInputMatMul(float3 a)
 
 float3 ACESOutputMatMul(float3 a)
 {
+    // ODT_SAT => XYZ => D60_2_D65 => sRGB
     float AIM[9] = {
      1.60475f, -0.53108f, -0.07367f,
     -0.10208f,  1.10813f, -0.00605f,
@@ -371,92 +391,154 @@ kernel void ToneMapKernel(FuReadImage_t bgd,
                      FuWriteImage_t dst,
                      int2 bgdsize,
                      const int tonemapper,
-                     const float gamma,
                      const float whitepoint,
-                     const float exposure
+                     const float exposurebias,
+                     const float pregamma,
+                     const float preexposure,
+                     const float postgamma,
+                     const float postexposure,
+                     const float4 sstep
                     )
 {
-    float4 incol1, outrgba;
+    float4 incol, outrgba;
     int2 ipos = (int2)(get_global_id(1), get_global_id(0));
-    incol1 = FuReadImageCf(bgd, ipos, bgdsize);
-    if (tonemapper == 0) outrgba.xyz = Linear(incol1.xyz, exposure);
-    else if (tonemapper == 1) outrgba.xyz = ReinhardSimple(incol1.xyz, exposure);
-    else if (tonemapper == 2) outrgba.xyz = ReinhardLuma(incol1.xyz);
-    else if (tonemapper == 3) outrgba.xyz = ReinhardLumaPreserveWhites(incol1.xyz, whitepoint);
-    else if (tonemapper == 4) outrgba.xyz = FilmicReinhard(incol1.xyz, whitepoint);
-    else if (tonemapper == 5) outrgba.xyz = ACES(incol1.xyz);
-    else if (tonemapper == 6) outrgba.xyz = ACESFitted(incol1.xyz);
-    else if (tonemapper == 7) {outrgba.xyz = FilmicA(incol1.xyz);outrgba.xyz = pow(outrgba.xyz, gamma);}
-    else if (tonemapper == 8) outrgba.xyz = FilmicB(incol1.xyz, whitepoint);
-    else if (tonemapper == 9) outrgba.xyz = Uncharted2(incol1.xyz, whitepoint, exposure);
-    else if (tonemapper == 10) {outrgba.xyz = Unreal(incol1.xyz);outrgba.xyz = pow(outrgba.xyz, gamma);}
-    else if (tonemapper == 11) outrgba.xyz = Uchimura(incol1.xyz);
-    else if (tonemapper == 12) outrgba.xyz = Lottes(incol1.xyz);
-    else if (tonemapper == 13) outrgba.xyz = RomB(incol1.xyz);
-    else if (tonemapper == 14) outrgba.xyz = CustomLog(incol1.xyz);
-    else outrgba.xyz = incol1.xyz;
+    incol = FuReadImageCf(bgd, ipos, bgdsize);
+    incol.xyz = max(sstep.w, incol.xyz);
+    incol.xyz *= preexposure;
+    incol.xyz = pow(incol.xyz, pregamma);
+    
+    if (tonemapper == 0) outrgba.xyz = Linear(incol.xyz);
+    else if (tonemapper == 1) outrgba.xyz = ReinhardSimple(incol.xyz, exposurebias);
+    else if (tonemapper == 2) outrgba.xyz = ReinhardLuma(incol.xyz);
+    else if (tonemapper == 3) outrgba.xyz = ReinhardLumaPreserveWhites(incol.xyz, whitepoint);
+    else if (tonemapper == 4) outrgba.xyz = FilmicReinhard(incol.xyz, whitepoint);
+    else if (tonemapper == 5) outrgba.xyz = ACES(incol.xyz);
+    else if (tonemapper == 6) outrgba.xyz = ACESFitted(incol.xyz);
+    else if (tonemapper == 7) {outrgba.xyz = pow(FilmicA(incol.xyz), 2.2);/*outrgba.xyz = pow(outrgba.xyz, postgamma);*/}
+    else if (tonemapper == 8) outrgba.xyz = FilmicB(incol.xyz, whitepoint);
+    else if (tonemapper == 9) outrgba.xyz = Uncharted2(incol.xyz, whitepoint, exposurebias);
+    else if (tonemapper == 10) {outrgba.xyz = Unreal(incol.xyz);/*outrgba.xyz = pow(outrgba.xyz, postgamma);*/}
+    else if (tonemapper == 11) outrgba.xyz = Uchimura(incol.xyz);
+    else if (tonemapper == 12) outrgba.xyz = Lottes(incol.xyz);
+    else if (tonemapper == 13) outrgba.xyz = RomB(incol.xyz);
+    else if (tonemapper == 14) outrgba.xyz = CustomLog(incol.xyz);
+    else outrgba.xyz = incol.xyz;
 
-        //
     // Smooth Step
     // outrgba.xyz = smoothstep(-0.025f, 1.0f, outrgba.xyz);
-    
     // Apply gamma
-    outrgba.xyz = pow(outrgba.xyz, 1.0f / gamma);
-    
+    outrgba.xyz = pow(outrgba.xyz, 1.0f / postgamma);
+    outrgba.xyz *= postexposure;
+    //outrgba.xyz = mix(outrgba.xyz, smoothstep(sstep.y, sstep.z, outrgba.xyz), sstep.x);    
     //Set alpha
-    outrgba.w = incol1.w;
+    outrgba.w = incol.w;
     FuWriteImagef(dst, ipos, bgdsize, outrgba);
 }
 ]]
 
 
 function Create()
-    InToneMapper = self:AddInput("Tone Mapper", "ToneMapper", {
-        LINKID_DataType = "Number",
-        INPID_InputControl = "ComboControl",
-        INP_Default = 0.0,
-        INP_Integer = true,
-        INP_DoNotifyChanged  = true,
-        { CCS_AddString = "Linear", },
-        { CCS_AddString = "Reinhard Simple", },
-        { CCS_AddString = "Reinhard Luma", },
-        { CCS_AddString = "Reinhard Preserve Whites", },
-        { CCS_AddString = "Reinhard Filmic", },
-        { CCS_AddString = "ACES", },
-        { CCS_AddString = "ACES Fitted", },
-        { CCS_AddString = "Filmic A", },
-        { CCS_AddString = "Filmic B", },
-        { CCS_AddString = "Uncharted 2", },
-        { CCS_AddString = "Unreal 3", },
-        { CCS_AddString = "Uchimura", },
-        { CCS_AddString = "Lottes", },
-        { CCS_AddString = "Romb", },
-        --{ CCS_AddString = "Custom Log", },
-        })
-        
-   InWhitePoint = self:AddInput("White Point", "WhitePoint", {
-        LINKID_DataType = "Number",
-        INPID_InputControl = "SliderControl",
-        INP_Default = 11.2,
-        INP_MinScale = 1.0,
-        INP_MaxScale = 20.0,
-        })
-        
-    InExposure = self:AddInput("Exposure", "Exposure", {
-        LINKID_DataType = "Number",
-        INPID_InputControl = "SliderControl",
-        INP_Default = 1.0,
-        INP_MinScale = 0.5,
-        INP_MaxScale = 5.0,
-        })
-        
-    InGamma = self:AddInput("Gamma", "Gamma", {
-        LINKID_DataType = "Number",
-        INPID_InputControl = "SliderControl",
-        INP_Default = 2.2,
-        INP_MinScale = 0.4545,
-        INP_MaxScale = 2.2,
-        })
+    self:BeginControlNest("Pre process", "PreProcessControls", false, {})
+        InPreClampBlacks = self:AddInput("Clamp Blacks", "PreClampBlacks", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "CheckboxControl",
+            INP_Default = 1.0,
+            INP_Integer = true,
+            })
+        InPreExposure = self:AddInput("Exposure", "PreExposure", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 1.0,
+            INP_MinScale = 0.1,
+            INP_MaxScale = 5.0,
+            })
+        InPreGamma = self:AddInput("Gamma", "PreGamma", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 1.0,
+            INP_MinScale = 0.4545,
+            INP_MaxScale = 2.2,
+            })
+    self:EndControlNest()
+
+    self:BeginControlNest("Tonemap", "ToneMapControls", true, {})
+        InToneMapper = self:AddInput("Tone Mapper", "ToneMapper", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "ComboControl",
+            INP_Default = 0.0,
+            INP_Integer = true,
+            INP_DoNotifyChanged  = true,
+            { CCS_AddString = "Linear", },
+            { CCS_AddString = "Reinhard Simple", },
+            { CCS_AddString = "Reinhard Luma", },
+            { CCS_AddString = "Reinhard Preserve Whites", },
+            { CCS_AddString = "Reinhard Filmic", },
+            { CCS_AddString = "ACES", },
+            { CCS_AddString = "ACES Fitted", },
+            { CCS_AddString = "Filmic A", },
+            { CCS_AddString = "Filmic B", },
+            { CCS_AddString = "Uncharted 2", },
+            { CCS_AddString = "Unreal 3", },
+            { CCS_AddString = "Uchimura", },
+            { CCS_AddString = "Lottes", },
+            { CCS_AddString = "Romb", },
+            --{ CCS_AddString = "Custom Log", },
+            })
+            
+       InWhitePoint = self:AddInput("White Point", "WhitePoint", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 11.2,
+            INP_MinScale = 1.0,
+            INP_MaxScale = 20.0,
+            })
+            
+        InExposureBias = self:AddInput("Exposure Bias", "ExposureBias", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 1.0,
+            INP_MinScale = 0.5,
+            INP_MaxScale = 5.0,
+            })
+    self:EndControlNest()
+
+    self:BeginControlNest("Post process", "PostProcessControls", false, {})
+        InPostExposure = self:AddInput("Exposure", "PostExposure", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 1.0,
+            INP_MinScale = 0.1,
+            INP_MaxScale = 5.0,
+            })
+        InPostGamma = self:AddInput("Gamma", "PostGamma", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 2.2,
+            INP_MinScale = 0.4545,
+            INP_MaxScale = 2.2,
+            })
+ --[[       InPostSmootStepMin = self:AddInput("Smoothstep Min", "PostSmoothstepMin", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 0.0,
+            INP_MinScale = -1.0,
+            INP_MaxScale = 1.0,
+            })
+        InPostSmootStepMax = self:AddInput("Smoothstep Max", "PostSmoothstepMax", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 1.0,
+            INP_MinScale = 0.0,
+            INP_MaxScale = 2.0,
+            })
+        InPostSmootStepStrength = self:AddInput("SmoothStep Strength", "PostSmoothStepStrength", {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "SliderControl",
+            INP_Default = 0,
+            INP_MinScale = 0,
+            INP_MaxScale = 1,
+            })]]
+    self:EndControlNest()
     
     InImage1 = self:AddInput("Input1", "Input1", {
         LINKID_DataType = "Image",
@@ -487,12 +569,12 @@ function NotifyChanged(inp, param, time)
         local mapper = param.Value
 		show_white_point = false;
 		show_exposure = false;
-        if mapper == 3 or mapper == 4 or mapper == 8 or mapper == 9 then show_white_point = true end
-        if mapper == 0 or mapper ==1 or mapper == 9 then show_exposure = true end
+        --if mapper == 3 or mapper == 4 or mapper == 8 or mapper == 9 then show_white_point = true end
+        --if mapper == 0 or mapper ==1 or mapper == 9 then show_exposure = true end
         --local default_exposures = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1}
         --InExposure:SetAttrs({ INP_Default = default_exposures[mapper+1] })  
-		InWhitePoint:SetAttrs({ IC_Disabled = not show_white_point, IC_Disabled = not show_white_point })
-		InExposure:SetAttrs({ IC_Disabled = not show_exposure, PC_Disabled = not show_exposure })
+		--InWhitePoint:SetAttrs({ IC_Disabled = not show_white_point, IC_Disabled = not show_white_point })
+		--InExposure:SetAttrs({ IC_Disabled = not show_exposure, PC_Disabled = not show_exposure })
     end
 end
 
@@ -502,8 +584,17 @@ function Process(req)
     local out = Image({IMG_Like=img1})
     local tonemapper = InToneMapper:GetValue(req).Value
     local whitepoint = InWhitePoint:GetValue(req).Value
-    local exposure = InExposure:GetValue(req).Value
-    local gamma = InGamma:GetValue(req).Value
+    local exposure_bias = InExposureBias:GetValue(req).Value
+    local pre_gamma = InPreGamma:GetValue(req).Value
+    local pre_exposure = InPreExposure:GetValue(req).Value
+    local post_exposure = InPostExposure:GetValue(req).Value
+    local post_gamma = InPostGamma:GetValue(req).Value
+    --local pre_sstep_min = InPreSmootStepMin:GetValue(req).Value
+    --local pre_sstep_max = InPreSmootStepMax:GetValue(req).Value
+    local post_sstep_strength = 0--InPostSmootStepStrength:GetValue(req).Value
+    local post_sstep_min = 0--InPostSmootStepMin:GetValue(req).Value
+    local post_sstep_max = 1--InPostSmootStepMax:GetValue(req).Value
+    local pre_clamp = -99999 * (1-InPreClampBlacks:GetValue(req).Value)
     local success = false
     
     -- local tonemap_kernel_names =
@@ -527,9 +618,14 @@ function Process(req)
                 prog:SetArg(tonemap_kernel, 1, outcl)
                 prog:SetArgInt(tonemap_kernel, 2, img1.Width, img1.Height)
                 prog:SetArgInt(tonemap_kernel, 3, tonemapper)
-                prog:SetArg(tonemap_kernel, 4, gamma)
-                prog:SetArg(tonemap_kernel, 5, whitepoint)
-                prog:SetArg(tonemap_kernel, 6, exposure)
+
+                prog:SetArg(tonemap_kernel, 4, whitepoint)
+                prog:SetArg(tonemap_kernel, 5, exposure_bias)
+                prog:SetArg(tonemap_kernel, 6, pre_gamma)
+                prog:SetArg(tonemap_kernel, 7, pre_exposure)
+                prog:SetArg(tonemap_kernel, 8, post_gamma)
+                prog:SetArg(tonemap_kernel, 9, post_exposure)
+                prog:SetArg(tonemap_kernel, 10, post_sstep_strength, post_sstep_min, post_sstep_max, pre_clamp)
                 success = prog:RunKernel(tonemap_kernel)
                 if self.Status then
                     if success then
