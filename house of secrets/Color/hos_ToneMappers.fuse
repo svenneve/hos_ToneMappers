@@ -633,6 +633,12 @@ function Process(req)
                     end
                 end
             end
+            if img1cl then
+                img1cl:ReleaseCLObject()
+            end
+            if outcl then
+                outcl:ReleaseCLObject()
+            end
         end
     end
 
